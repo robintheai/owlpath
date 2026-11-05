@@ -1,0 +1,17 @@
+[Unit]
+Description=Owlpath mirror receiver authenticated by GitHub OIDC
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/owlpath-mirror/publisher.py
+WorkingDirectory=/opt/owlpath-mirror
+Restart=on-failure
+User=root
+UMask=0022
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/sspanel/public/clients/owlpath /opt/sspanel/storage/owlpath-release-incoming
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target

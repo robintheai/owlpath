@@ -1,0 +1,94 @@
+name: Release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Smoke tests
+        run: dotnet run --project tests/Simple.Smoke -c Release
+      - name: Mirror receiver tests
+        run: |
+          python3 -m venv /tmp/mirror-tests
+          /tmp/mirror-tests/bin/pip -q install cryptography==46.0.5
+          /tmp/mirror-tests/bin/python -I server/mirror/test_publisher.py
+      - name: Tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(python3 -c 'import xml.etree.ElementTree as ET; print(ET.parse("v2rayN/Simple/Simple.csproj").findtext("./PropertyGroup/Version"))')
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME does not match Simple.csproj $version"; exit 1; }
+  build:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, rid: osx-arm64 }
+          - { runner: macos-15, rid: osx-x64 }
+          - { runner: windows-latest, rid: win-x64 }
+          - { runner: windows-latest, rid: win-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Smoke tests on this platform
+        run: dotnet run --project tests/Simple.Smoke -c Release
+      - name: Package
+        shell: bash
+        run: |
+          version=$(python -c 'import xml.etree.ElementTree as ET; print(ET.parse("v2rayN/Simple/Simple.csproj").findtext("./PropertyGroup/Version"))')
+          python scripts/build.py --rid "${{ matrix.rid }}" --version "$version" --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Source archive and checksums
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git archive --format=zip --output="dist/Owlpath-$version-source.zip" "$GITHUB_SHA"
+          cd dist && ls && [ "$(ls Owlpath-*-macos-*.dmg Owlpath-*-windows-*.zip | wc -l)" = 4 ]
+          sha256sum Owlpath-*.dmg Owlpath-*.zip > SHA256SUMS && cat SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/Owlpath-* dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/Owlpath-* dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --title "Owlpath $GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md --latest
+          fi
+      - name: Publish website mirror
+        run: python3 scripts/publish-mirror.py

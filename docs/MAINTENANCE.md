@@ -18,14 +18,15 @@ together with that commit.
 
 ## Release
 
-1. Bump `<Version>` in `v2rayN/Simple/Simple.csproj` and `versionCode`/`versionName` in `mobile/android/app/build.gradle`.
-2. Commit, then build every package from that commit (`BUILD-INFO.json` records the source commit):
-   `python3 scripts/build.py --rid <osx-arm64|osx-x64|win-x64|win-arm64> --version X.Y.Z --output dist`,
-   plus the Android APK (see `mobile/README.md`).
-3. Run the smoke tests, the integration test on macOS, the Go tests and the Android instrumented tests.
-4. Write `SHA256SUMS` for the packages, create the GitHub release `vX.Y.Z` with all packages and `SHA256SUMS`, then
-   mirror the same files to `https://ai.z5a.com/clients/owlpath/releases/vX.Y.Z/` and update its `latest.json`
-   (same shape as the GitHub release API).
+1. Bump `<Version>` in `v2rayN/Simple/Simple.csproj` and `versionCode`/`versionName` in `mobile/android/app/build.gradle`,
+   and update `RELEASE-NOTES.md`.
+2. Merge to `main`, then push the tag `vX.Y.Z` (it must match `<Version>`).
+3. `.github/workflows/release.yml` runs the smoke tests on Linux, macOS and Windows, builds the four desktop packages
+   with `scripts/build.py`, adds the source archive and `SHA256SUMS`, publishes the GitHub release, and uploads the same
+   files to `https://ai.z5a.com/clients/owlpath/` through the OIDC receiver in `server/mirror` (see its README for the
+   one-time server setup). If the mirror upload fails, re-run the `release` job; the GitHub release is updated in place.
+4. Android is signed with the private local key and attached to the release separately (see `mobile/README.md`).
+   Run the macOS integration test and the Android instrumented tests locally before tagging.
 
 The desktop updater reads the mirror first and falls back to the GitHub API. It accepts packages only from
 `github.com/robintheai/owlpath/releases/download/` or the mirror's `/clients/owlpath/releases/` folder,
