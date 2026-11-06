@@ -45,7 +45,10 @@ fallback and no direct mode. Only Disconnect or Quit releases the tunnel.
 - **Once a Connect has carried traffic, every later failure is recovery** (`_recovering`):
   - The TUN bridge (macOS, Windows) or VPN interface (Android) stays up. Only the outbound core is replaced, so while
     no location works, traffic is dropped.
-  - Health checks run every 30 s (10 s when degraded); three tunnel failures trigger recovery. With no physical
+  - Health checks run every 30 s (10 s when degraded); three tunnel failures trigger recovery. Before anything changes, the current
+    location and two others are tested through their own cores outside the tunnel: if the current one works, only our
+    side is restarted on the same location (same exit IP, no cooldown); if none works, the network is down and the app
+    waits; only when others work and the current one does not is the location cooled down and replaced. With no physical
     network the app waits instead of cycling through locations. After sleep it checks at once.
   - Screening (`ScreenCandidates`): because the app's own sockets go into the blocked tunnel, each candidate is tested
     end to end through its own core outside the tunnel, four at a time, within 20 s. Working locations are tried first:

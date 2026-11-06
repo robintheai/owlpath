@@ -112,6 +112,14 @@ public sealed class ClientController(bool integrationTest = false) : INotifyProp
         var siblings = AvailableLocations.Where(n => n.Country == node.Country).OrderBy(n => n.Sort).ThenBy(n => n.Id, StringComparer.Ordinal).ToList();
         return siblings.Count > 1 ? $"{node.CountryLabel} {siblings.FindIndex(n => n.Id == node.Id) + 1}" : node.CountryLabel;
     }
+    /// <summary>What the connection actually uses: a renamed location in a refreshed subscription is the same endpoint.</summary>
+    internal static string ConnectionKey(NodeRow node)
+    {
+        var profile = JsonUtils.DeepCopy(node.Profile);
+        profile.IndexId = ""; profile.Remarks = "";
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(profile))));
+    }
     internal static string MeasurementKey(NodeRow node)
     {
         var profile = JsonUtils.DeepCopy(node.Profile);
@@ -775,6 +783,23 @@ public sealed class ClientController(bool integrationTest = false) : INotifyProp
                 if (action != HealthAction.Reconnect) { Notify(); return; }
                 CancelTest();
                 while (IsTesting) await Task.Delay(50);
+                // Find out why before touching the connection. Blaming the location for a network outage or a stuck
+                // local core changed the exit IP twice per glitch (fallback, then back three minutes later).
+                var cause = await DiagnoseFailure(_connectCts.Token);
+                Logging.SaveLog($"Simple.Health: diagnosis={cause}");
+                if (cause == FailureCause.Network) { _offline = true; Notify(); return; }
+                if (cause == FailureCause.Local)
+                {
+                    // The location works outside the tunnel: restart our side on the same location, same exit IP.
+                    await DisconnectInternal(keepMacBridge: UseTunBridge);
+                    try
+                    {
+                        await ConnectInternal(_connectCts.Token);
+                        _health.Reset(); _recoveryAttempts = 0; _lastHealth = DateTimeOffset.UtcNow;
+                        return;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { Logging.SaveLog("Simple.Health: same-location restart failed", ex); }
+                }
                 _cooldowns[Config.IndexId] = now.AddMinutes(5);
                 await DisconnectInternal(keepMacBridge: UseTunBridge);
                 if (_wantConnected) await ConnectSmart(_connectCts.Token);
@@ -786,6 +811,29 @@ public sealed class ClientController(bool integrationTest = false) : INotifyProp
                 if (!Connected && _wantConnected) ScheduleRetry();
             }
         }, allowMeasurements: true);
+    }
+    private enum FailureCause { Node, Network, Local }
+    /// <summary>
+    /// The tunnel stopped answering. Tests the current location and two others through their own cores, outside the
+    /// tunnel: the current one works → our side is stuck (Local); none works → the network is down (Network);
+    /// only others work → the location failed (Node).
+    /// </summary>
+    private async Task<FailureCause> DiagnoseFailure(CancellationToken token)
+    {
+        if (integrationTest || Nodes.FirstOrDefault(n => n.Id == Config.IndexId) is not { } current) return FailureCause.Node;
+        var physicalInterface = OperatingSystem.IsMacOS() ? await MacVpnConflict.FindPhysicalInterface() : null;
+        if (OperatingSystem.IsMacOS() && physicalInterface is null) return FailureCause.Network;
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(token);
+        budget.CancelAfter(TimeSpan.FromSeconds(15));
+        async Task<bool> Works(NodeRow row, int queue)
+        {
+            try { return await ProbeNode(row, physicalInterface, queue, budget.Token) > 0; }
+            catch (Exception) when (!token.IsCancellationRequested) { return false; }
+        }
+        var others = AvailableLocations.Where(n => n.Id != current.Id).Take(2).ToList();
+        var results = await Task.WhenAll([Works(current, 90), .. others.Select((n, i) => Works(n, 91 + i))]);
+        token.ThrowIfCancellationRequested();
+        return results[0] ? FailureCause.Local : results.Skip(1).Any(r => r) ? FailureCause.Node : FailureCause.Network;
     }
     private async Task<(bool ProxyOk, bool SystemOk)> ProbeHealth(CancellationToken token)
     {
@@ -1022,7 +1070,7 @@ public sealed class ClientController(bool integrationTest = false) : INotifyProp
             }
             if (subs.Count == 0) { if (!silent) throw new InvalidOperationException(Ui.T("Add a subscription link first.", "请先添加订阅链接。")); return; }
             var wasConnected = Connected; var oldId = Config.IndexId;
-            var oldConnectionKey = Nodes.FirstOrDefault(n => n.Id == oldId) is { } oldNode ? MeasurementKey(oldNode) : null;
+            var oldConnectionKey = Nodes.FirstOrDefault(n => n.Id == oldId) is { } oldNode ? ConnectionKey(oldNode) : null;
             var previousNotice = Notice; var succeeded = 0;
             foreach (var sub in subs)
             {
@@ -1042,7 +1090,7 @@ public sealed class ClientController(bool integrationTest = false) : INotifyProp
             if (succeeded == subs.Count) { Settings.LastSubscriptionRefresh = DateTimeOffset.UtcNow; Settings.Save(); }
             if (wasConnected)
             {
-                var retained = AvailableLocations.FirstOrDefault(n => MeasurementKey(n) == oldConnectionKey);
+                var retained = AvailableLocations.FirstOrDefault(n => ConnectionKey(n) == oldConnectionKey);
                 if (retained is not null)
                 {
                     await ConfigHandler.SetDefaultServerIndex(Config, retained.Id);
