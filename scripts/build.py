@@ -55,7 +55,12 @@ def main():
         (stage/'Applications').symlink_to('/Applications')
         shutil.copy2(ROOT/'INSTALL.md',stage/'安装说明.md')
         destination=out/(filename+'.dmg');destination.unlink(missing_ok=True)
-        run('hdiutil','create','-volname','Owlpath','-srcfolder',stage,'-ov','-format','UDZO',destination)
+        # hdiutil sometimes fails with "Resource busy" while macOS indexes the new image; retry briefly.
+        for attempt in range(5):
+            try: run('hdiutil','create','-volname','Owlpath','-srcfolder',stage,'-ov','-format','UDZO',destination); break
+            except subprocess.CalledProcessError:
+                if attempt==4: raise
+                import time; time.sleep(5*(attempt+1))
     else:
         destination=out/(filename+'.zip');destination.unlink(missing_ok=True)
         with zipfile.ZipFile(destination,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
